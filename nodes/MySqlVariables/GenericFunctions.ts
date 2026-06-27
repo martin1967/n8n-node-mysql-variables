@@ -70,14 +70,41 @@ export function sanitizeTableName(name: string): string {
 	return name;
 }
 
-function defaultSqlitePath(): string {
-	const base = process.env.N8N_USER_FOLDER || join(homedir(), '.n8n');
-	return join(base, 'n8n-mysql-variables.sqlite');
+function userFolder(): string {
+	return process.env.N8N_USER_FOLDER || join(homedir(), '.n8n');
+}
+
+function slugify(name: string): string {
+	return name
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 60);
+}
+
+/**
+ * Resolves the SQLite file = the variable store, so users don't have to manage
+ * paths and can't accidentally share one. Priority:
+ *   1. Explicit path (advanced override)
+ *   2. <user folder>/n8n-vars-<username>.sqlite   (friendly, isolated per name)
+ *   3. <user folder>/n8n-vars-<hash(encryptionKey)>.sqlite  (auto private store)
+ */
+function resolveSqlitePath(raw: ICredentialDataDecryptedObject): string {
+	const explicit = ((raw.sqliteFile as string) || '').trim();
+	if (raw.advancedPath && explicit) return explicit;
+
+	const username = slugify(((raw.username as string) || '').trim());
+	if (username) return join(userFolder(), `n8n-vars-${username}.sqlite`);
+
+	const keyHash = createHash('sha256')
+		.update((raw.encryptionKey as string) || '', 'utf8')
+		.digest('hex')
+		.slice(0, 16);
+	return join(userFolder(), `n8n-vars-${keyHash}.sqlite`);
 }
 
 export function parseCredentials(raw: ICredentialDataDecryptedObject): ParsedCredentials {
 	const storage: StorageBackend = (raw.storage as string) === 'mysql' ? 'mysql' : 'sqlite';
-	const sqliteFile = ((raw.sqliteFile as string) || '').trim();
 
 	return {
 		storage,
@@ -87,7 +114,7 @@ export function parseCredentials(raw: ICredentialDataDecryptedObject): ParsedCre
 		user: raw.user as string,
 		password: raw.password as string,
 		ssl: raw.ssl as boolean,
-		sqliteFile: sqliteFile || defaultSqlitePath(),
+		sqliteFile: resolveSqlitePath(raw),
 		encryptionKey: raw.encryptionKey as string,
 		table: sanitizeTableName(((raw.table as string) || 'n8n_variables').trim()),
 		autoCreateTable: raw.autoCreateTable !== false,

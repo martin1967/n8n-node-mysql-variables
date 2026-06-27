@@ -28,18 +28,37 @@ export class MySqlVariablesApi implements ICredentialType {
 			default: '',
 			required: true,
 			description:
-				'Passphrase used to AES-256-GCM encrypt values at rest. IMPORTANT: to read SHARED variables created by other accounts, every account must use the SAME encryption key. Losing this key makes encrypted values unrecoverable.',
+				'Passphrase used to AES-256-GCM encrypt values at rest. Also used to auto-derive a private SQLite store when no Username is set. Losing this key makes encrypted values unrecoverable.',
 		},
 		// ---- SQLite ----
+		{
+			displayName: 'Username',
+			name: 'username',
+			type: 'string',
+			default: '',
+			placeholder: 'alice',
+			displayOptions: { show: { storage: ['sqlite'] } },
+			description:
+				'Friendly name for your variable store. Each distinct username gets its own isolated set of variables. Leave empty to automatically get a private store derived from your Encryption Key. To share variables, use the SAME username + Encryption Key, or just share this credential with colleagues.',
+		},
+		{
+			displayName: 'Advanced: Custom File Path',
+			name: 'advancedPath',
+			type: 'boolean',
+			default: false,
+			displayOptions: { show: { storage: ['sqlite'] } },
+			description:
+				'Whether to store the SQLite file at an explicit path instead of the auto-managed location. For advanced users.',
+		},
 		{
 			displayName: 'SQLite File Path',
 			name: 'sqliteFile',
 			type: 'string',
 			default: '',
-			displayOptions: { show: { storage: ['sqlite'] } },
+			displayOptions: { show: { storage: ['sqlite'], advancedPath: [true] } },
 			placeholder: '/home/node/.n8n/vars-alice.sqlite',
 			description:
-				'Path to the SQLite file = this store. Use a UNIQUE path per credential for isolation (credentials that share a path share variables — that is how you build a shared "service account" store and share that credential with colleagues). Credentials that leave this empty all share the default file <n8n user folder>/n8n-mysql-variables.sqlite. Keep the file on a mounted volume so data survives restarts.',
+				'Explicit path to the SQLite file (overrides Username / auto). Credentials pointing at the same path share the same variables. Keep the file on a mounted volume so data survives restarts.',
 		},
 		// ---- MySQL ----
 		{
@@ -71,7 +90,6 @@ export class MySqlVariablesApi implements ICredentialType {
 			type: 'string',
 			default: 'n8n',
 			displayOptions: { show: { storage: ['mysql'] } },
-			description: 'MySQL user. Give each person their own MySQL login with privileges on the variables table.',
 		},
 		{
 			displayName: 'Password',
@@ -89,14 +107,16 @@ export class MySqlVariablesApi implements ICredentialType {
 			displayOptions: { show: { storage: ['mysql'] } },
 			description: 'Whether to connect using SSL/TLS (self-signed certificates are accepted)',
 		},
-		// ---- Common ----
 		{
 			displayName: 'Table Name',
 			name: 'table',
 			type: 'string',
 			default: 'n8n_variables',
-			description: 'Table used to store variables (letters, digits and underscore only)',
+			displayOptions: { show: { storage: ['mysql'] } },
+			description:
+				'MySQL table for this store. Use a separate table (or database) per credential for isolation. Letters, digits and underscore only.',
 		},
+		// ---- Common ----
 		{
 			displayName: 'Auto-create Table',
 			name: 'autoCreateTable',

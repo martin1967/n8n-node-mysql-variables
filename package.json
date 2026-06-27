@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-mysql-variables",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "n8n community node to store variables (cookies, API keys, client id/secret) in MySQL or embedded SQLite — flat key→value store with per-credential isolation and AES-256-GCM encryption at rest.",
   "keywords": [
     "n8n-community-node-package",
