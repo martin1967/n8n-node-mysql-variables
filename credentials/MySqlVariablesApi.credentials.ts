@@ -28,7 +28,7 @@ export class MySqlVariablesApi implements ICredentialType {
 			default: '',
 			required: true,
 			description:
-				'Passphrase used to AES-256-GCM encrypt values at rest. Also used to auto-derive a private SQLite store when no Username is set. Losing this key makes encrypted values unrecoverable.',
+				'Passphrase that (1) AES-256-GCM encrypts values at rest and (2) is the ACCESS SECRET for your store: the SQLite file is derived from it, so without this exact key another user cannot open or list your store even if they know your Username. Losing it makes the store unrecoverable.',
 		},
 		// ---- SQLite ----
 		{
@@ -39,7 +39,7 @@ export class MySqlVariablesApi implements ICredentialType {
 			placeholder: 'alice',
 			displayOptions: { show: { storage: ['sqlite'] } },
 			description:
-				'Friendly name for your variable store. Each distinct username gets its own isolated set of variables. Leave empty to automatically get a private store derived from your Encryption Key. To share variables, use the SAME username + Encryption Key, or just share this credential with colleagues.',
+				'Optional LABEL that lets one Encryption Key own several separate stores. It is NOT a secret — access is gated by the Encryption Key, so typing someone else\'s username does not reveal their store. Leave empty for a single store per key. To share, colleagues need the same Username AND Encryption Key (or just share this credential).',
 		},
 		{
 			displayName: 'Advanced: Custom File Path',
