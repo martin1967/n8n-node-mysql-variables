@@ -21,16 +21,6 @@ export class MySqlVariablesApi implements ICredentialType {
 				'Where to store variables. SQLite needs no database server — data is kept in a file inside the n8n data folder. Use MySQL for a central store shared across multiple n8n instances.',
 		},
 		{
-			displayName: 'Account',
-			name: 'account',
-			type: 'string',
-			default: '',
-			required: true,
-			placeholder: 'alice',
-			description:
-				'Owner identity for variables created with this credential. Each person should use a unique account name. Variables are isolated by account; only "shared" ones are visible to other accounts (read-only for them).',
-		},
-		{
 			displayName: 'Encryption Key',
 			name: 'encryptionKey',
 			type: 'string',
@@ -47,9 +37,9 @@ export class MySqlVariablesApi implements ICredentialType {
 			type: 'string',
 			default: '',
 			displayOptions: { show: { storage: ['sqlite'] } },
-			placeholder: '/home/node/.n8n/n8n-mysql-variables.sqlite',
+			placeholder: '/home/node/.n8n/vars-alice.sqlite',
 			description:
-				'Path to the SQLite file. Leave empty to use <n8n user folder>/n8n-mysql-variables.sqlite. Keep it on a mounted volume so data survives restarts.',
+				'Path to the SQLite file = this store. Use a UNIQUE path per credential for isolation (credentials that share a path share variables — that is how you build a shared "service account" store and share that credential with colleagues). Credentials that leave this empty all share the default file <n8n user folder>/n8n-mysql-variables.sqlite. Keep the file on a mounted volume so data survives restarts.',
 		},
 		// ---- MySQL ----
 		{

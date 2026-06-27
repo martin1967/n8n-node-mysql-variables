@@ -6,12 +6,12 @@
 
 В отличие от готовых решений:
 
-| Решение | Persist | Read/Write | Multi-user | Шифрование |
+| Решение | Persist | Read/Write | Изоляция | Шифрование |
 |---|---|---|---|---|
-| `$vars` (native) | ✅ | ✅ | ✅ | — (Enterprise only) |
+| `$vars` (native) | ✅ | ✅ | — | — (Enterprise only) |
 | `n8n-nodes-globals` | ✅ | только чтение | ❌ | ❌ |
 | `n8n-nodes-datastore` | ❌ (RAM) | ✅ | ❌ | ❌ |
-| **этот пакет** | ✅ MySQL | ✅ | ✅ (по аккаунтам) | ✅ AES-256-GCM |
+| **этот пакет** | ✅ SQLite/MySQL | ✅ | ✅ (по credential) | ✅ AES-256-GCM |
 
 ## Хранилище: SQLite или MySQL
 
@@ -25,59 +25,51 @@
 - **MySQL** — централизованное хранилище, общее для нескольких инстансов n8n, с возможностью
   дать каждому свой MySQL-логин.
 
-Вся логика (аккаунты, `shared`, AES-шифрование, операции) одинакова для обоих бэкендов.
+Логика (плоский key→value, AES-шифрование, операции) одинакова для обоих бэкендов.
 
 > SQLite-файл держи на смонтированном volume (`~/.n8n`), иначе данные не переживут пересоздание контейнера.
 
 ## Возможности
 
 - **Операции:** Get, Get All Keys, Set (upsert), Create, Update, Delete, Clear (обнулить значение).
-- **Мультиаккаунтность:** у каждого свой `Account` в credential. Переменные изолированы по владельцу.
-- **Shared-переменные:** флаг `shared` — читают все аккаунты, но **править/удалять может только создатель**.
+- **Плоский key→value:** один store = один файл SQLite (или одна таблица MySQL). Ключ уникален в рамках store.
 - **Шифрование at rest:** значения шифруются AES-256-GCM перед записью; в БД лежит шифротекст.
 - **Типы значений:** String и JSON.
 - **Usable as Tool:** ноду можно подключать к AI-агентам n8n.
 
-## Модель доступа
+## Модель доступа и шеринг
 
-- Владелец переменной = поле **Account** в credential.
-- Уникальность ключа: **`(owner, key)`** — два аккаунта могут иметь свой `stripe_key` независимо.
-- `Get` отдаёт сначала собственную переменную, затем (если своей нет) `shared`-переменную с таким ключом.
-- Все операции записи (`set`/`create`/`update`/`delete`/`clear`) работают только со строками `owner = <ваш Account>`. Поэтому чужие `shared`-переменные доступны только на чтение.
+Изоляция — **по credential/файлу**, а не внутри одной таблицы:
 
-> ⚠️ **Важно про shared + шифрование.** Значения шифруются ключом из credential.
-> Чтобы `shared`-переменные **читались всеми аккаунтами**, у всех должен быть **одинаковый `Encryption Key`**.
-> Приватные переменные могут использовать любой ключ (их всё равно читает только владелец).
+- **Личный store:** в credential укажи уникальный `SQLite File Path` (напр. `vars-alice.sqlite`).
+  Чужой файл другой человек просто не видит.
+- **Общий store (на команду):** заведи отдельный «сервисный» credential с общим путём
+  (напр. `vars-team.sqlite`) и **расшарь этот credential** между коллегами через стандартный
+  механизм n8n (Credential sharing). Кто имеет доступ к credential — тот видит общие переменные.
+- **Конфиденциальность содержимого:** значения шифруются `Encryption Key` из credential.
+  Личный credential → личный ключ; общий credential → общий ключ (его видят только те, кому
+  расшарен credential).
+
+> ⚠️ Credentials с **одинаковым** `SQLite File Path` работают с **одним и тем же** набором
+> переменных. Для изоляции у каждого личного credential должен быть свой путь.
 
 ## Схема таблицы
 
-Создаётся автоматически (`Auto-create Table` = on). SQL для ручного создания:
+Создаётся автоматически (`Auto-create Table` = on). SQL для ручного создания (MySQL):
 
 ```sql
 CREATE TABLE IF NOT EXISTS `n8n_variables` (
-  `owner`      VARCHAR(190) NOT NULL,
   `key`        VARCHAR(190) NOT NULL,
   `value`      LONGTEXT NULL,
   `type`       VARCHAR(20) NOT NULL DEFAULT 'string',
   `encrypted`  TINYINT(1) NOT NULL DEFAULT 1,
-  `shared`     TINYINT(1) NOT NULL DEFAULT 0,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`owner`, `key`),
-  KEY `idx_shared` (`shared`)
+  PRIMARY KEY (`key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-### Рекомендуемые гранты (least privilege)
-
-Дайте каждому человеку свой MySQL-логин с правами только на таблицу переменных:
-
-```sql
-CREATE USER 'alice'@'%' IDENTIFIED BY 'strong-password';
-GRANT SELECT, INSERT, UPDATE, DELETE ON `n8n`.`n8n_variables` TO 'alice'@'%';
--- при Auto-create Table нужен также CREATE:
-GRANT CREATE ON `n8n`.* TO 'alice'@'%';
-```
+При MySQL изоляция делается через **отдельную таблицу** (`Table Name`) или отдельную БД на credential.
 
 ## Сборка
 
@@ -158,11 +150,10 @@ services:
 | Поле | Описание |
 |---|---|
 | **Storage** | `SQLite (embedded)` или `MySQL`. |
-| **Account** | Уникальное имя владельца (например, `alice`). Определяет изоляцию. |
-| **Encryption Key** | Ключ AES. Для общих переменных — одинаковый у всех. |
-| SQLite File Path | Только для SQLite. Пусто = `<user folder>/n8n-mysql-variables.sqlite`. |
+| **Encryption Key** | Ключ AES для значений в этом store. |
+| SQLite File Path | Только для SQLite. **Уникальный путь = изоляция.** Пусто = общий дефолтный файл. |
 | Host / Port / Database / User / Password / SSL | Только для MySQL. В Docker `localhost` ≠ хост — см. ниже. |
-| Table Name | По умолчанию `n8n_variables`. |
+| Table Name | По умолчанию `n8n_variables`. Для MySQL-изоляции — своя таблица на credential. |
 | Auto-create Table | Создавать таблицу автоматически. |
 
 > **Docker + MySQL:** `localhost` внутри контейнера n8n указывает на сам контейнер.
@@ -181,15 +172,15 @@ services:
 
 ## Операции
 
-| Операция | Что делает | Скоуп |
-|---|---|---|
-| **Get Variable** | Читает значение по ключу (своя → затем shared) | own + shared |
-| **Get All Keys** | Список ключей (фильтр All/Mine/Shared, опц. значения) | own + shared |
-| **Set Variable** | Upsert (создать или обновить) | только own |
-| **Create Variable** | Вставить, ошибка если уже есть | только own |
-| **Update Variable** | Обновить, ошибка если нет | только own |
-| **Delete Variable** | Удалить ключ целиком | только own |
-| **Clear Variable** | Обнулить значение, ключ оставить | только own |
+| Операция | Что делает |
+|---|---|
+| **Get Variable** | Читает значение по ключу |
+| **Get All Keys** | Список всех ключей (опц. со значениями) |
+| **Set Variable** | Upsert (создать или обновить) |
+| **Create Variable** | Вставить, ошибка если уже есть |
+| **Update Variable** | Обновить, ошибка если нет |
+| **Delete Variable** | Удалить ключ целиком |
+| **Clear Variable** | Обнулить значение, ключ оставить |
 
 ## Лицензия
 

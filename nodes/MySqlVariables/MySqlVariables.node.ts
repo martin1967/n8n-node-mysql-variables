@@ -20,7 +20,7 @@ export class MySqlVariables implements INodeType {
 		version: 1,
 		subtitle: '={{ $parameter["operation"] }}',
 		description:
-			'Store and read dynamic & static variables (cookies, API keys, client id/secret) in MySQL or embedded SQLite, with per-account isolation, shared variables and AES-256-GCM encryption',
+			'Store and read variables (cookies, API keys, client id/secret) in MySQL or embedded SQLite, with per-credential isolation and AES-256-GCM encryption',
 		defaults: {
 			name: 'MySQL Variables',
 		},
@@ -44,19 +44,19 @@ export class MySqlVariables implements INodeType {
 						name: 'Get Variable',
 						value: 'get',
 						action: 'Get a variable by key',
-						description: 'Read one variable (own first, then shared)',
+						description: 'Read one variable by key',
 					},
 					{
 						name: 'Get All Keys',
 						value: 'getKeys',
-						action: 'List visible variable keys',
-						description: 'List keys visible to this account (own + shared)',
+						action: 'List all variable keys',
+						description: 'List every key in this store',
 					},
 					{
 						name: 'Set Variable',
 						value: 'set',
 						action: 'Create or update a variable',
-						description: 'Upsert a variable for this account',
+						description: 'Upsert a variable',
 					},
 					{
 						name: 'Create Variable',
@@ -68,19 +68,19 @@ export class MySqlVariables implements INodeType {
 						name: 'Update Variable',
 						value: 'update',
 						action: 'Update an existing variable',
-						description: 'Update an existing own variable, fail if missing',
+						description: 'Update an existing variable, fail if missing',
 					},
 					{
 						name: 'Delete Variable',
 						value: 'delete',
 						action: 'Delete a variable',
-						description: 'Remove an own variable entirely',
+						description: 'Remove a variable entirely',
 					},
 					{
 						name: 'Clear Variable',
 						value: 'clear',
 						action: 'Clear a variable value',
-						description: "Empty an own variable's value but keep the key",
+						description: "Empty a variable's value but keep the key",
 					},
 				],
 				default: 'get',
@@ -95,7 +95,7 @@ export class MySqlVariables implements INodeType {
 				displayOptions: {
 					show: { operation: ['get', 'set', 'create', 'update', 'delete', 'clear'] },
 				},
-				description: 'The variable key (unique per account)',
+				description: 'The variable key (unique within this store)',
 			},
 			{
 				displayName: 'Value Type',
@@ -122,31 +122,6 @@ export class MySqlVariables implements INodeType {
 				description: 'Value to store. For the JSON value type, provide valid JSON.',
 			},
 			{
-				displayName: 'Shared',
-				name: 'shared',
-				type: 'boolean',
-				default: false,
-				displayOptions: {
-					show: { operation: ['set', 'create', 'update'] },
-				},
-				description:
-					'Whether other accounts can read this variable. Only the owner can edit or delete it.',
-			},
-			{
-				displayName: 'Filter',
-				name: 'filter',
-				type: 'options',
-				options: [
-					{ name: 'All Visible (Own + Shared)', value: 'all' },
-					{ name: 'Mine Only', value: 'mine' },
-					{ name: 'Shared Only', value: 'shared' },
-				],
-				default: 'all',
-				displayOptions: {
-					show: { operation: ['getKeys'] },
-				},
-			},
-			{
 				displayName: 'Include Values',
 				name: 'includeValues',
 				type: 'boolean',
@@ -155,7 +130,7 @@ export class MySqlVariables implements INodeType {
 					show: { operation: ['getKeys'] },
 				},
 				description:
-					'Whether to decrypt and include values in the output (otherwise only metadata is returned)',
+					'Whether to decrypt and include values in the output (otherwise only keys and metadata are returned)',
 			},
 			{
 				displayName: 'Options',
@@ -167,14 +142,6 @@ export class MySqlVariables implements INodeType {
 					show: { operation: ['get'] },
 				},
 				options: [
-					{
-						displayName: 'Owner Override',
-						name: 'ownerOverride',
-						type: 'string',
-						default: '',
-						description:
-							"Read a specific owner's shared variable instead of resolving own-then-shared. Private variables of other accounts remain inaccessible.",
-					},
 					{
 						displayName: 'Return Empty if Not Found',
 						name: 'returnEmptyIfNotFound',
@@ -193,14 +160,6 @@ export class MySqlVariables implements INodeType {
 		const returnData: INodeExecutionData[] = [];
 
 		const creds = parseCredentials(await this.getCredentials('mySqlVariablesApi'));
-		if (!creds.account) {
-			throw new NodeOperationError(
-				this.getNode(),
-				'The "Account" field is required in the MySQL Variables credential.',
-			);
-		}
-
-		const owner = creds.account;
 		const store = await createStore(creds);
 
 		try {
@@ -213,17 +172,13 @@ export class MySqlVariables implements INodeType {
 					const operation = this.getNodeParameter('operation', i) as string;
 
 					if (operation === 'getKeys') {
-						const filter = this.getNodeParameter('filter', i) as 'all' | 'mine' | 'shared';
 						const includeValues = this.getNodeParameter('includeValues', i) as boolean;
 
-						const rows = await store.list(filter, owner);
+						const rows = await store.list();
 						for (const row of rows) {
 							const out: IDataObject = {
 								key: row.key,
-								owner: row.owner,
-								shared: !!row.shared,
 								type: row.type,
-								isMine: row.owner === owner,
 								createdAt: row.created_at,
 								updatedAt: row.updated_at,
 							};
@@ -242,20 +197,17 @@ export class MySqlVariables implements INodeType {
 
 					if (operation === 'get') {
 						const options = this.getNodeParameter('options', i, {}) as IDataObject;
-						const ownerOverride = ((options.ownerOverride as string) || '').trim();
 						const returnEmpty = options.returnEmptyIfNotFound as boolean;
 
-						const row = await store.getOne(key, owner, ownerOverride || undefined);
+						const row = await store.getOne(key);
 
 						if (!row) {
 							if (returnEmpty) {
 								result = { key, value: null, found: false };
 							} else {
-								throw new NodeOperationError(
-									this.getNode(),
-									`Variable "${key}" not found or not visible to account "${owner}".`,
-									{ itemIndex: i },
-								);
+								throw new NodeOperationError(this.getNode(), `Variable "${key}" not found.`, {
+									itemIndex: i,
+								});
 							}
 						} else {
 							const decrypted = decryptValue(row.value, creds.encryptionKey);
@@ -263,17 +215,13 @@ export class MySqlVariables implements INodeType {
 								key: row.key,
 								value:
 									row.type === 'json' && decrypted != null ? JSON.parse(decrypted) : decrypted,
-								owner: row.owner,
-								shared: !!row.shared,
 								type: row.type,
-								isMine: row.owner === owner,
 								found: true,
 							};
 						}
 					} else if (operation === 'set' || operation === 'create' || operation === 'update') {
 						const valueType = this.getNodeParameter('valueType', i) as string;
 						const rawValue = this.getNodeParameter('value', i) as string;
-						const shared = this.getNodeParameter('shared', i) as boolean;
 
 						if (valueType === 'json') {
 							try {
@@ -289,45 +237,43 @@ export class MySqlVariables implements INodeType {
 						const encrypted = encryptValue(rawValue, creds.encryptionKey);
 
 						if (operation === 'set') {
-							await store.upsert(owner, key, encrypted, valueType, shared);
+							await store.upsert(key, encrypted, valueType);
 						} else if (operation === 'create') {
 							try {
-								await store.insert(owner, key, encrypted, valueType, shared);
+								await store.insert(key, encrypted, valueType);
 							} catch (insertError) {
 								if (insertError instanceof DuplicateKeyError) {
 									throw new NodeOperationError(
 										this.getNode(),
-										`Variable "${key}" already exists for account "${owner}". Use "Set" or "Update" instead.`,
+										`Variable "${key}" already exists. Use "Set" or "Update" instead.`,
 										{ itemIndex: i },
 									);
 								}
 								throw insertError;
 							}
 						} else {
-							const affected = await store.update(owner, key, encrypted, valueType, shared);
+							const affected = await store.update(key, encrypted, valueType);
 							if (affected === 0) {
 								throw new NodeOperationError(
 									this.getNode(),
-									`Variable "${key}" not found for account "${owner}". You can only update your own variables.`,
+									`Variable "${key}" not found. Use "Create" or "Set" to add it.`,
 									{ itemIndex: i },
 								);
 							}
 						}
 
-						result = { key, owner, shared, type: valueType, operation, success: true };
+						result = { key, type: valueType, operation, success: true };
 					} else if (operation === 'delete') {
-						const affected = await store.remove(owner, key);
-						result = { key, owner, deleted: affected > 0, operation };
+						const affected = await store.remove(key);
+						result = { key, deleted: affected > 0, operation };
 					} else if (operation === 'clear') {
-						const { existed } = await store.clearValue(owner, key);
+						const { existed } = await store.clearValue(key);
 						if (!existed) {
-							throw new NodeOperationError(
-								this.getNode(),
-								`Variable "${key}" not found for account "${owner}".`,
-								{ itemIndex: i },
-							);
+							throw new NodeOperationError(this.getNode(), `Variable "${key}" not found.`, {
+								itemIndex: i,
+							});
 						}
-						result = { key, owner, cleared: true, operation };
+						result = { key, cleared: true, operation };
 					} else {
 						throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, {
 							itemIndex: i,

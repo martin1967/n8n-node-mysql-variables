@@ -8,37 +8,35 @@ import type { Database, SqlJsStatic } from 'sql.js';
 import type { ParsedCredentials } from './GenericFunctions';
 
 export interface StoredRow {
-	owner: string;
 	key: string;
 	value: string | null;
 	type: string;
-	shared: number;
 	created_at?: string;
 	updated_at?: string;
 }
 
-export type ListFilter = 'all' | 'mine' | 'shared';
-
 export class DuplicateKeyError extends Error {}
 
 /**
- * Backend-agnostic variable store. The node layer handles encryption, so all
- * `value` arguments/results here are already-encrypted (or NULL) opaque strings.
+ * Backend-agnostic variable store. Isolation is per store (one SQLite file or
+ * one MySQL table = one independent key→value space). The node layer handles
+ * encryption, so all `value` arguments/results here are already-encrypted
+ * (or NULL) opaque strings.
  */
 export interface VariableStore {
 	init(): Promise<void>;
 	ensureSchema(): Promise<void>;
-	getOne(key: string, owner: string, ownerOverride?: string): Promise<StoredRow | null>;
-	list(filter: ListFilter, owner: string): Promise<StoredRow[]>;
-	upsert(owner: string, key: string, value: string, type: string, shared: boolean): Promise<void>;
-	insert(owner: string, key: string, value: string, type: string, shared: boolean): Promise<void>;
-	update(owner: string, key: string, value: string, type: string, shared: boolean): Promise<number>;
-	remove(owner: string, key: string): Promise<number>;
-	clearValue(owner: string, key: string): Promise<{ existed: boolean }>;
+	getOne(key: string): Promise<StoredRow | null>;
+	list(): Promise<StoredRow[]>;
+	upsert(key: string, value: string, type: string): Promise<void>;
+	insert(key: string, value: string, type: string): Promise<void>;
+	update(key: string, value: string, type: string): Promise<number>;
+	remove(key: string): Promise<number>;
+	clearValue(key: string): Promise<{ existed: boolean }>;
 	close(): Promise<void>;
 }
 
-const SELECT_COLS = '`owner`,`key`,`value`,`type`,`shared`,`created_at`,`updated_at`';
+const SELECT_COLS = '`key`,`value`,`type`,`created_at`,`updated_at`';
 
 // --------------------------------------------------------------------------
 // MySQL backend
@@ -66,67 +64,47 @@ class MysqlStore implements VariableStore {
 	async ensureSchema(): Promise<void> {
 		await this.conn.query(
 			`CREATE TABLE IF NOT EXISTS \`${this.creds.table}\` (
-				\`owner\` VARCHAR(190) NOT NULL,
 				\`key\` VARCHAR(190) NOT NULL,
 				\`value\` LONGTEXT NULL,
 				\`type\` VARCHAR(20) NOT NULL DEFAULT 'string',
 				\`encrypted\` TINYINT(1) NOT NULL DEFAULT 1,
-				\`shared\` TINYINT(1) NOT NULL DEFAULT 0,
 				\`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				\`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-				PRIMARY KEY (\`owner\`, \`key\`),
-				KEY \`idx_shared\` (\`shared\`)
+				PRIMARY KEY (\`key\`)
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		);
 	}
 
-	async getOne(key: string, owner: string, ownerOverride?: string): Promise<StoredRow | null> {
-		const t = this.creds.table;
-		const [rows] = ownerOverride
-			? await this.conn.query(
-					`SELECT ${SELECT_COLS} FROM \`${t}\` WHERE \`key\`=? AND \`owner\`=? AND (\`owner\`=? OR \`shared\`=1) LIMIT 1`,
-					[key, ownerOverride, owner],
-				)
-			: await this.conn.query(
-					`SELECT ${SELECT_COLS} FROM \`${t}\` WHERE \`key\`=? AND (\`owner\`=? OR \`shared\`=1) ORDER BY (\`owner\`=?) DESC LIMIT 1`,
-					[key, owner, owner],
-				);
+	async getOne(key: string): Promise<StoredRow | null> {
+		const [rows] = await this.conn.query(
+			`SELECT ${SELECT_COLS} FROM \`${this.creds.table}\` WHERE \`key\`=? LIMIT 1`,
+			[key],
+		);
 		const list = rows as StoredRow[];
 		return list.length ? list[0] : null;
 	}
 
-	async list(filter: ListFilter, owner: string): Promise<StoredRow[]> {
-		const t = this.creds.table;
-		let where = '(`owner`=? OR `shared`=1)';
-		const params: unknown[] = [owner];
-		if (filter === 'mine') {
-			where = '`owner`=?';
-		} else if (filter === 'shared') {
-			where = '`shared`=1';
-			params.length = 0;
-		}
+	async list(): Promise<StoredRow[]> {
 		const [rows] = await this.conn.query(
-			`SELECT ${SELECT_COLS} FROM \`${t}\` WHERE ${where} ORDER BY \`owner\` ASC, \`key\` ASC`,
-			params,
+			`SELECT ${SELECT_COLS} FROM \`${this.creds.table}\` ORDER BY \`key\` ASC`,
 		);
 		return rows as StoredRow[];
 	}
 
-	async upsert(owner: string, key: string, value: string, type: string, shared: boolean): Promise<void> {
+	async upsert(key: string, value: string, type: string): Promise<void> {
 		await this.conn.query(
-			`INSERT INTO \`${this.creds.table}\` (\`owner\`,\`key\`,\`value\`,\`type\`,\`encrypted\`,\`shared\`)
-			 VALUES (?,?,?,?,1,?)
-			 ON DUPLICATE KEY UPDATE \`value\`=VALUES(\`value\`), \`type\`=VALUES(\`type\`), \`encrypted\`=1, \`shared\`=VALUES(\`shared\`)`,
-			[owner, key, value, type, shared ? 1 : 0],
+			`INSERT INTO \`${this.creds.table}\` (\`key\`,\`value\`,\`type\`,\`encrypted\`)
+			 VALUES (?,?,?,1)
+			 ON DUPLICATE KEY UPDATE \`value\`=VALUES(\`value\`), \`type\`=VALUES(\`type\`), \`encrypted\`=1`,
+			[key, value, type],
 		);
 	}
 
-	async insert(owner: string, key: string, value: string, type: string, shared: boolean): Promise<void> {
+	async insert(key: string, value: string, type: string): Promise<void> {
 		try {
 			await this.conn.query(
-				`INSERT INTO \`${this.creds.table}\` (\`owner\`,\`key\`,\`value\`,\`type\`,\`encrypted\`,\`shared\`)
-				 VALUES (?,?,?,?,1,?)`,
-				[owner, key, value, type, shared ? 1 : 0],
+				`INSERT INTO \`${this.creds.table}\` (\`key\`,\`value\`,\`type\`,\`encrypted\`) VALUES (?,?,?,1)`,
+				[key, value, type],
 			);
 		} catch (error) {
 			if ((error as { code?: string }).code === 'ER_DUP_ENTRY') {
@@ -136,34 +114,31 @@ class MysqlStore implements VariableStore {
 		}
 	}
 
-	async update(owner: string, key: string, value: string, type: string, shared: boolean): Promise<number> {
+	async update(key: string, value: string, type: string): Promise<number> {
 		const [res] = await this.conn.query(
-			`UPDATE \`${this.creds.table}\` SET \`value\`=?, \`type\`=?, \`encrypted\`=1, \`shared\`=? WHERE \`owner\`=? AND \`key\`=?`,
-			[value, type, shared ? 1 : 0, owner, key],
+			`UPDATE \`${this.creds.table}\` SET \`value\`=?, \`type\`=?, \`encrypted\`=1 WHERE \`key\`=?`,
+			[value, type, key],
 		);
 		return (res as { affectedRows: number }).affectedRows;
 	}
 
-	async remove(owner: string, key: string): Promise<number> {
-		const [res] = await this.conn.query(
-			`DELETE FROM \`${this.creds.table}\` WHERE \`owner\`=? AND \`key\`=?`,
-			[owner, key],
-		);
+	async remove(key: string): Promise<number> {
+		const [res] = await this.conn.query(`DELETE FROM \`${this.creds.table}\` WHERE \`key\`=?`, [key]);
 		return (res as { affectedRows: number }).affectedRows;
 	}
 
-	async clearValue(owner: string, key: string): Promise<{ existed: boolean }> {
+	async clearValue(key: string): Promise<{ existed: boolean }> {
 		const [res] = await this.conn.query(
-			`UPDATE \`${this.creds.table}\` SET \`value\`=NULL WHERE \`owner\`=? AND \`key\`=?`,
-			[owner, key],
+			`UPDATE \`${this.creds.table}\` SET \`value\`=NULL WHERE \`key\`=?`,
+			[key],
 		);
 		if ((res as { affectedRows: number }).affectedRows > 0) {
 			return { existed: true };
 		}
 		// affectedRows is 0 either when the row is missing or value was already NULL.
 		const [chk] = await this.conn.query(
-			`SELECT 1 FROM \`${this.creds.table}\` WHERE \`owner\`=? AND \`key\`=? LIMIT 1`,
-			[owner, key],
+			`SELECT 1 FROM \`${this.creds.table}\` WHERE \`key\`=? LIMIT 1`,
+			[key],
 		);
 		return { existed: (chk as unknown[]).length > 0 };
 	}
@@ -246,67 +221,46 @@ class SqliteStore implements VariableStore {
 	async ensureSchema(): Promise<void> {
 		this.db.run(
 			`CREATE TABLE IF NOT EXISTS \`${this.creds.table}\` (
-				\`owner\` TEXT NOT NULL,
 				\`key\` TEXT NOT NULL,
 				\`value\` TEXT,
 				\`type\` TEXT NOT NULL DEFAULT 'string',
 				\`encrypted\` INTEGER NOT NULL DEFAULT 1,
-				\`shared\` INTEGER NOT NULL DEFAULT 0,
 				\`created_at\` TEXT NOT NULL DEFAULT (datetime('now')),
 				\`updated_at\` TEXT NOT NULL DEFAULT (datetime('now')),
-				PRIMARY KEY (\`owner\`, \`key\`)
+				PRIMARY KEY (\`key\`)
 			)`,
 		);
 		this.persist();
 	}
 
-	async getOne(key: string, owner: string, ownerOverride?: string): Promise<StoredRow | null> {
-		const t = this.creds.table;
-		const rows = ownerOverride
-			? this.select(
-					`SELECT ${SELECT_COLS} FROM \`${t}\` WHERE \`key\`=? AND \`owner\`=? AND (\`owner\`=? OR \`shared\`=1) LIMIT 1`,
-					[key, ownerOverride, owner],
-				)
-			: this.select(
-					`SELECT ${SELECT_COLS} FROM \`${t}\` WHERE \`key\`=? AND (\`owner\`=? OR \`shared\`=1) ORDER BY (\`owner\`=?) DESC LIMIT 1`,
-					[key, owner, owner],
-				);
+	async getOne(key: string): Promise<StoredRow | null> {
+		const rows = this.select(
+			`SELECT ${SELECT_COLS} FROM \`${this.creds.table}\` WHERE \`key\`=? LIMIT 1`,
+			[key],
+		);
 		return rows.length ? rows[0] : null;
 	}
 
-	async list(filter: ListFilter, owner: string): Promise<StoredRow[]> {
-		const t = this.creds.table;
-		let where = '(`owner`=? OR `shared`=1)';
-		const params: unknown[] = [owner];
-		if (filter === 'mine') {
-			where = '`owner`=?';
-		} else if (filter === 'shared') {
-			where = '`shared`=1';
-			params.length = 0;
-		}
-		return this.select(
-			`SELECT ${SELECT_COLS} FROM \`${t}\` WHERE ${where} ORDER BY \`owner\` ASC, \`key\` ASC`,
-			params,
-		);
+	async list(): Promise<StoredRow[]> {
+		return this.select(`SELECT ${SELECT_COLS} FROM \`${this.creds.table}\` ORDER BY \`key\` ASC`, []);
 	}
 
-	async upsert(owner: string, key: string, value: string, type: string, shared: boolean): Promise<void> {
+	async upsert(key: string, value: string, type: string): Promise<void> {
 		this.run(
-			`INSERT INTO \`${this.creds.table}\` (\`owner\`,\`key\`,\`value\`,\`type\`,\`encrypted\`,\`shared\`,\`updated_at\`)
-			 VALUES (?,?,?,?,1,?, datetime('now'))
-			 ON CONFLICT(\`owner\`,\`key\`) DO UPDATE SET
-			   \`value\`=excluded.\`value\`, \`type\`=excluded.\`type\`, \`encrypted\`=1, \`shared\`=excluded.\`shared\`, \`updated_at\`=datetime('now')`,
-			[owner, key, value, type, shared ? 1 : 0],
+			`INSERT INTO \`${this.creds.table}\` (\`key\`,\`value\`,\`type\`,\`encrypted\`,\`updated_at\`)
+			 VALUES (?,?,?,1, datetime('now'))
+			 ON CONFLICT(\`key\`) DO UPDATE SET
+			   \`value\`=excluded.\`value\`, \`type\`=excluded.\`type\`, \`encrypted\`=1, \`updated_at\`=datetime('now')`,
+			[key, value, type],
 		);
 		this.persist();
 	}
 
-	async insert(owner: string, key: string, value: string, type: string, shared: boolean): Promise<void> {
+	async insert(key: string, value: string, type: string): Promise<void> {
 		try {
 			this.run(
-				`INSERT INTO \`${this.creds.table}\` (\`owner\`,\`key\`,\`value\`,\`type\`,\`encrypted\`,\`shared\`)
-				 VALUES (?,?,?,?,1,?)`,
-				[owner, key, value, type, shared ? 1 : 0],
+				`INSERT INTO \`${this.creds.table}\` (\`key\`,\`value\`,\`type\`,\`encrypted\`) VALUES (?,?,?,1)`,
+				[key, value, type],
 			);
 		} catch (error) {
 			if (/UNIQUE constraint failed/i.test((error as Error).message)) {
@@ -317,34 +271,31 @@ class SqliteStore implements VariableStore {
 		this.persist();
 	}
 
-	async update(owner: string, key: string, value: string, type: string, shared: boolean): Promise<number> {
+	async update(key: string, value: string, type: string): Promise<number> {
 		const n = this.run(
-			`UPDATE \`${this.creds.table}\` SET \`value\`=?, \`type\`=?, \`encrypted\`=1, \`shared\`=?, \`updated_at\`=datetime('now') WHERE \`owner\`=? AND \`key\`=?`,
-			[value, type, shared ? 1 : 0, owner, key],
+			`UPDATE \`${this.creds.table}\` SET \`value\`=?, \`type\`=?, \`encrypted\`=1, \`updated_at\`=datetime('now') WHERE \`key\`=?`,
+			[value, type, key],
 		);
 		this.persist();
 		return n;
 	}
 
-	async remove(owner: string, key: string): Promise<number> {
-		const n = this.run(`DELETE FROM \`${this.creds.table}\` WHERE \`owner\`=? AND \`key\`=?`, [owner, key]);
+	async remove(key: string): Promise<number> {
+		const n = this.run(`DELETE FROM \`${this.creds.table}\` WHERE \`key\`=?`, [key]);
 		this.persist();
 		return n;
 	}
 
-	async clearValue(owner: string, key: string): Promise<{ existed: boolean }> {
+	async clearValue(key: string): Promise<{ existed: boolean }> {
 		const n = this.run(
-			`UPDATE \`${this.creds.table}\` SET \`value\`=NULL, \`updated_at\`=datetime('now') WHERE \`owner\`=? AND \`key\`=?`,
-			[owner, key],
+			`UPDATE \`${this.creds.table}\` SET \`value\`=NULL, \`updated_at\`=datetime('now') WHERE \`key\`=?`,
+			[key],
 		);
 		if (n > 0) {
 			this.persist();
 			return { existed: true };
 		}
-		const chk = this.select(`SELECT \`key\` FROM \`${this.creds.table}\` WHERE \`owner\`=? AND \`key\`=? LIMIT 1`, [
-			owner,
-			key,
-		]);
+		const chk = this.select(`SELECT \`key\` FROM \`${this.creds.table}\` WHERE \`key\`=? LIMIT 1`, [key]);
 		return { existed: chk.length > 0 };
 	}
 

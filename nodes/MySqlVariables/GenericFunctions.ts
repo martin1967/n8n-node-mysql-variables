@@ -19,7 +19,6 @@ export interface ParsedCredentials {
 	// SQLite
 	sqliteFile: string;
 	// Common
-	account: string;
 	encryptionKey: string;
 	table: string;
 	autoCreateTable: boolean;
@@ -89,7 +88,6 @@ export function parseCredentials(raw: ICredentialDataDecryptedObject): ParsedCre
 		password: raw.password as string,
 		ssl: raw.ssl as boolean,
 		sqliteFile: sqliteFile || defaultSqlitePath(),
-		account: ((raw.account as string) || '').trim(),
 		encryptionKey: raw.encryptionKey as string,
 		table: sanitizeTableName(((raw.table as string) || 'n8n_variables').trim()),
 		autoCreateTable: raw.autoCreateTable !== false,
