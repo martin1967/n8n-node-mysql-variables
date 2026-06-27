@@ -1,17 +1,24 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
-import mysql from 'mysql2/promise';
-import type { Connection } from 'mysql2/promise';
+import { homedir } from 'os';
+import { join } from 'path';
 import type { ICredentialDataDecryptedObject } from 'n8n-workflow';
 
 const ENC_PREFIX = 'enc:v1:';
 
-export interface MySqlVariablesCredentials {
+export type StorageBackend = 'sqlite' | 'mysql';
+
+export interface ParsedCredentials {
+	storage: StorageBackend;
+	// MySQL
 	host: string;
 	port: number;
 	database: string;
 	user: string;
 	password: string;
 	ssl: boolean;
+	// SQLite
+	sqliteFile: string;
+	// Common
 	account: string;
 	encryptionKey: string;
 	table: string;
@@ -42,7 +49,7 @@ export function encryptValue(plain: string, passphrase: string): string {
 
 /**
  * Decrypts a value produced by encryptValue. Values that do not carry the
- * encryption prefix (e.g. rows inserted manually into MySQL) are returned as-is.
+ * encryption prefix (e.g. rows inserted manually into the database) are returned as-is.
  */
 export function decryptValue(stored: string | null, passphrase: string): string | null {
 	if (stored === null || stored === undefined) return stored;
@@ -64,54 +71,27 @@ export function sanitizeTableName(name: string): string {
 	return name;
 }
 
-export function parseCredentials(raw: ICredentialDataDecryptedObject): MySqlVariablesCredentials {
+function defaultSqlitePath(): string {
+	const base = process.env.N8N_USER_FOLDER || join(homedir(), '.n8n');
+	return join(base, 'n8n-mysql-variables.sqlite');
+}
+
+export function parseCredentials(raw: ICredentialDataDecryptedObject): ParsedCredentials {
+	const storage: StorageBackend = (raw.storage as string) === 'mysql' ? 'mysql' : 'sqlite';
+	const sqliteFile = ((raw.sqliteFile as string) || '').trim();
+
 	return {
+		storage,
 		host: (raw.host as string) || 'localhost',
 		port: (raw.port as number) || 3306,
 		database: raw.database as string,
 		user: raw.user as string,
 		password: raw.password as string,
 		ssl: raw.ssl as boolean,
+		sqliteFile: sqliteFile || defaultSqlitePath(),
 		account: ((raw.account as string) || '').trim(),
 		encryptionKey: raw.encryptionKey as string,
 		table: sanitizeTableName(((raw.table as string) || 'n8n_variables').trim()),
 		autoCreateTable: raw.autoCreateTable !== false,
 	};
-}
-
-export async function createConnection(creds: MySqlVariablesCredentials): Promise<Connection> {
-	return mysql.createConnection({
-		host: creds.host,
-		port: creds.port,
-		user: creds.user,
-		password: creds.password,
-		database: creds.database,
-		ssl: creds.ssl ? { rejectUnauthorized: false } : undefined,
-		multipleStatements: false,
-		supportBigNumbers: true,
-		dateStrings: true,
-	});
-}
-
-/** Thin query helper returning the first element of mysql2's [result, fields] tuple. */
-export async function query(conn: Connection, sql: string, params: unknown[] = []): Promise<any> {
-	const [rows] = await conn.query(sql, params);
-	return rows;
-}
-
-export async function ensureTable(conn: Connection, table: string): Promise<void> {
-	await conn.query(
-		`CREATE TABLE IF NOT EXISTS \`${table}\` (
-			\`owner\` VARCHAR(190) NOT NULL,
-			\`key\` VARCHAR(190) NOT NULL,
-			\`value\` LONGTEXT NULL,
-			\`type\` VARCHAR(20) NOT NULL DEFAULT 'string',
-			\`encrypted\` TINYINT(1) NOT NULL DEFAULT 1,
-			\`shared\` TINYINT(1) NOT NULL DEFAULT 0,
-			\`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			\`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-			PRIMARY KEY (\`owner\`, \`key\`),
-			KEY \`idx_shared\` (\`shared\`)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-	);
 }

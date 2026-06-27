@@ -8,14 +8,8 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import {
-	createConnection,
-	decryptValue,
-	encryptValue,
-	ensureTable,
-	parseCredentials,
-	query,
-} from './GenericFunctions';
+import { decryptValue, encryptValue, parseCredentials } from './GenericFunctions';
+import { createStore, DuplicateKeyError } from './stores';
 
 export class MySqlVariables implements INodeType {
 	description: INodeTypeDescription = {
@@ -26,7 +20,7 @@ export class MySqlVariables implements INodeType {
 		version: 1,
 		subtitle: '={{ $parameter["operation"] }}',
 		description:
-			'Store and read dynamic & static variables (cookies, API keys, client id/secret) in MySQL, with per-account isolation, shared variables and AES-256-GCM encryption',
+			'Store and read dynamic & static variables (cookies, API keys, client id/secret) in MySQL or embedded SQLite, with per-account isolation, shared variables and AES-256-GCM encryption',
 		defaults: {
 			name: 'MySQL Variables',
 		},
@@ -206,12 +200,12 @@ export class MySqlVariables implements INodeType {
 			);
 		}
 
-		const { table, account: owner } = creds;
-		const conn = await createConnection(creds);
+		const owner = creds.account;
+		const store = await createStore(creds);
 
 		try {
 			if (creds.autoCreateTable) {
-				await ensureTable(conn, table);
+				await store.ensureSchema();
 			}
 
 			for (let i = 0; i < items.length; i++) {
@@ -219,26 +213,11 @@ export class MySqlVariables implements INodeType {
 					const operation = this.getNodeParameter('operation', i) as string;
 
 					if (operation === 'getKeys') {
-						const filter = this.getNodeParameter('filter', i) as string;
+						const filter = this.getNodeParameter('filter', i) as 'all' | 'mine' | 'shared';
 						const includeValues = this.getNodeParameter('includeValues', i) as boolean;
 
-						let where = '(`owner` = ? OR `shared` = 1)';
-						const params: unknown[] = [owner];
-						if (filter === 'mine') {
-							where = '`owner` = ?';
-						} else if (filter === 'shared') {
-							where = '`shared` = 1';
-							params.length = 0;
-						}
-
-						const rows = await query(
-							conn,
-							`SELECT \`owner\`,\`key\`,\`type\`,\`shared\`,\`value\`,\`created_at\`,\`updated_at\`
-							 FROM \`${table}\` WHERE ${where} ORDER BY \`owner\` ASC, \`key\` ASC`,
-							params,
-						);
-
-						for (const row of rows as IDataObject[]) {
+						const rows = await store.list(filter, owner);
+						for (const row of rows) {
 							const out: IDataObject = {
 								key: row.key,
 								owner: row.owner,
@@ -249,7 +228,7 @@ export class MySqlVariables implements INodeType {
 								updatedAt: row.updated_at,
 							};
 							if (includeValues) {
-								const decrypted = decryptValue(row.value as string, creds.encryptionKey);
+								const decrypted = decryptValue(row.value, creds.encryptionKey);
 								out.value =
 									row.type === 'json' && decrypted != null ? JSON.parse(decrypted) : decrypted;
 							}
@@ -266,26 +245,9 @@ export class MySqlVariables implements INodeType {
 						const ownerOverride = ((options.ownerOverride as string) || '').trim();
 						const returnEmpty = options.returnEmptyIfNotFound as boolean;
 
-						let rows;
-						if (ownerOverride) {
-							rows = await query(
-								conn,
-								`SELECT \`owner\`,\`key\`,\`value\`,\`type\`,\`shared\` FROM \`${table}\`
-								 WHERE \`key\` = ? AND \`owner\` = ? AND (\`owner\` = ? OR \`shared\` = 1) LIMIT 1`,
-								[key, ownerOverride, owner],
-							);
-						} else {
-							// Prefer the account's own variable, fall back to a shared one.
-							rows = await query(
-								conn,
-								`SELECT \`owner\`,\`key\`,\`value\`,\`type\`,\`shared\` FROM \`${table}\`
-								 WHERE \`key\` = ? AND (\`owner\` = ? OR \`shared\` = 1)
-								 ORDER BY (\`owner\` = ?) DESC LIMIT 1`,
-								[key, owner, owner],
-							);
-						}
+						const row = await store.getOne(key, owner, ownerOverride || undefined);
 
-						if (!rows || rows.length === 0) {
+						if (!row) {
 							if (returnEmpty) {
 								result = { key, value: null, found: false };
 							} else {
@@ -296,8 +258,7 @@ export class MySqlVariables implements INodeType {
 								);
 							}
 						} else {
-							const row = rows[0] as IDataObject;
-							const decrypted = decryptValue(row.value as string, creds.encryptionKey);
+							const decrypted = decryptValue(row.value, creds.encryptionKey);
 							result = {
 								key: row.key,
 								value:
@@ -328,23 +289,12 @@ export class MySqlVariables implements INodeType {
 						const encrypted = encryptValue(rawValue, creds.encryptionKey);
 
 						if (operation === 'set') {
-							await query(
-								conn,
-								`INSERT INTO \`${table}\` (\`owner\`,\`key\`,\`value\`,\`type\`,\`encrypted\`,\`shared\`)
-								 VALUES (?,?,?,?,1,?)
-								 ON DUPLICATE KEY UPDATE \`value\`=VALUES(\`value\`), \`type\`=VALUES(\`type\`), \`encrypted\`=1, \`shared\`=VALUES(\`shared\`)`,
-								[owner, key, encrypted, valueType, shared ? 1 : 0],
-							);
+							await store.upsert(owner, key, encrypted, valueType, shared);
 						} else if (operation === 'create') {
 							try {
-								await query(
-									conn,
-									`INSERT INTO \`${table}\` (\`owner\`,\`key\`,\`value\`,\`type\`,\`encrypted\`,\`shared\`)
-									 VALUES (?,?,?,?,1,?)`,
-									[owner, key, encrypted, valueType, shared ? 1 : 0],
-								);
+								await store.insert(owner, key, encrypted, valueType, shared);
 							} catch (insertError) {
-								if ((insertError as { code?: string }).code === 'ER_DUP_ENTRY') {
+								if (insertError instanceof DuplicateKeyError) {
 									throw new NodeOperationError(
 										this.getNode(),
 										`Variable "${key}" already exists for account "${owner}". Use "Set" or "Update" instead.`,
@@ -354,13 +304,8 @@ export class MySqlVariables implements INodeType {
 								throw insertError;
 							}
 						} else {
-							const res = await query(
-								conn,
-								`UPDATE \`${table}\` SET \`value\`=?, \`type\`=?, \`encrypted\`=1, \`shared\`=?
-								 WHERE \`owner\`=? AND \`key\`=?`,
-								[encrypted, valueType, shared ? 1 : 0, owner, key],
-							);
-							if (res.affectedRows === 0) {
+							const affected = await store.update(owner, key, encrypted, valueType, shared);
+							if (affected === 0) {
 								throw new NodeOperationError(
 									this.getNode(),
 									`Variable "${key}" not found for account "${owner}". You can only update your own variables.`,
@@ -371,32 +316,16 @@ export class MySqlVariables implements INodeType {
 
 						result = { key, owner, shared, type: valueType, operation, success: true };
 					} else if (operation === 'delete') {
-						const res = await query(
-							conn,
-							`DELETE FROM \`${table}\` WHERE \`owner\`=? AND \`key\`=?`,
-							[owner, key],
-						);
-						result = { key, owner, deleted: res.affectedRows > 0, operation };
+						const affected = await store.remove(owner, key);
+						result = { key, owner, deleted: affected > 0, operation };
 					} else if (operation === 'clear') {
-						const res = await query(
-							conn,
-							`UPDATE \`${table}\` SET \`value\`=NULL WHERE \`owner\`=? AND \`key\`=?`,
-							[owner, key],
-						);
-						if (res.affectedRows === 0) {
-							// affectedRows is 0 either when the row is missing or already NULL.
-							const exists = await query(
-								conn,
-								`SELECT 1 FROM \`${table}\` WHERE \`owner\`=? AND \`key\`=? LIMIT 1`,
-								[owner, key],
+						const { existed } = await store.clearValue(owner, key);
+						if (!existed) {
+							throw new NodeOperationError(
+								this.getNode(),
+								`Variable "${key}" not found for account "${owner}".`,
+								{ itemIndex: i },
 							);
-							if (!exists || exists.length === 0) {
-								throw new NodeOperationError(
-									this.getNode(),
-									`Variable "${key}" not found for account "${owner}".`,
-									{ itemIndex: i },
-								);
-							}
 						}
 						result = { key, owner, cleared: true, operation };
 					} else {
@@ -418,7 +347,7 @@ export class MySqlVariables implements INodeType {
 				}
 			}
 		} finally {
-			await conn.end();
+			await store.close();
 		}
 
 		return [returnData];
