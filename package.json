@@ -1,0 +1,57 @@
+{
+  "name": "n8n-nodes-mysql-variables",
+  "version": "0.1.0",
+  "description": "n8n community node to store dynamic & static variables (cookies, API keys, client id/secret) in MySQL — with per-account isolation, shared variables and AES-256-GCM encryption at rest.",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "mysql",
+    "variables",
+    "globals",
+    "secrets",
+    "credentials"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/martin1967/n8n-node-mysql-variables",
+  "author": {
+    "name": "marat"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/martin1967/n8n-node-mysql-variables.git"
+  },
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.10"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc && node scripts/copy-assets.js",
+    "dev": "tsc --watch",
+    "format": "prettier nodes credentials --write",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/MySqlVariablesApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/MySqlVariables/MySqlVariables.node.js"
+    ]
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "n8n-workflow": "*",
+    "rimraf": "^5.0.7",
+    "typescript": "^5.5.4"
+  }
+}
